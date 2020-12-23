@@ -1,76 +1,35 @@
 import bpy
 import os
 import random
-from data_generation import hdri, utils
+from data_generation import hdri, utils, cloth_utils, transform_utils
 import numpy as np
+import mathutils
 
 utils.cleanup()
 
 directory_path = '/home/victor/Blender/Files/HDRI maps'
+directory_path = '/home/idlab185/Blender/Files/HDRI maps'
+
 filename = random.choice(os.listdir(directory_path))
 filepath = os.path.join(directory_path, filename)
 
 hdri.load(filepath)
 
 bpy.ops.mesh.primitive_plane_add(size=1.5)
+ground = bpy.context.active_object
+utils.select_only(ground)
+bpy.ops.object.modifier_add(type='COLLISION')
+ground.collision.cloth_friction = 50
+ground.collision.thickness_outer = 0.001
 
+cloth = cloth_utils.create_cloth_mesh(10, 10)
 
-def add_horizontal_edges(edges, rows, cols):
-    for n in range(rows):
-        for m in range(cols):
-            if m + 1 < cols:
-                i = m + n * cols
-                edges.append((i, i + 1))
-
-
-def add_vertical_edges(edges, rows, cols):
-    for m in range(cols):
-        for n in range(rows):
-            if n + 1 < rows:
-                i = m + n * cols
-                j = m + (n + 1) * cols
-                edges.append((i, j))
-                
-
-def generate_edges(rows, cols):
-    edges = []
-    add_horizontal_edges(edges, rows, cols)
-    add_vertical_edges(edges, rows, cols)
-    return edges
-
-
-def create_cloth_mesh(rows, cols):
-    n_masses = rows * cols
-    length = 0.5
-    l_rest = length / (rows - 1)
-
-    def init_position(i, cols, l_rest):
-        x = l_rest * np.floor(i / cols) - length / 2
-        y = l_rest * (i % cols) - length / 2
-        z = 0.5
-        return np.array([x, y, z], dtype=np.float32)
-
-
-    p0 = np.array([init_position(i, cols, l_rest) for i in np.arange(n_masses)])
-    
-    verts = p0
-    edges = generate_edges(rows, cols)
-    faces = [] 
-    
-    mesh = bpy.data.meshes.new('mesh')
-    mesh.from_pydata(verts, edges, faces)
-    cloth = bpy.data.objects.new("Cloth", mesh)
-    bpy.context.scene.collection.objects.link(cloth)
-    bpy.context.view_layer.objects.active = cloth
-    
-    bpy.ops.object.mode_set(mode='EDIT')
-    bpy.ops.mesh.fill_holes()
-    bpy.ops.object.mode_set(mode='OBJECT')
-    
-    return cloth
-
-
-cloth = create_cloth_mesh(10, 10)
+   # marking the edge crease to prevent smooth corners
+bpy.ops.object.mode_set(mode='EDIT')
+bpy.ops.mesh.select_all(action='INVERT')
+bpy.ops.mesh.select_non_manifold()
+bpy.ops.transform.edge_crease(value=1) 
+bpy.ops.object.mode_set(mode='OBJECT')
 
 cloth_material = bpy.data.materials.new(name="Cloth")
 cloth_material.use_nodes = True
@@ -78,8 +37,47 @@ cloth_material.node_tree.nodes['Principled BSDF'].inputs['Base Color'].default_v
 
 cloth.data.materials.append(cloth_material)
 
-
 utils.select_only(cloth)
-bpy.ops.transform.rotate(value=2 *np.pi * random.random(), axis=(1,1,1))
 
-# TODO random rotation vector, random angle
+R = transform_utils.random_rotation_matrix()
+R = mathutils.Matrix(R).to_4x4()
+
+cloth.matrix_world = R @ cloth.matrix_world
+bpy.ops.transform.translate(value=(0, 0, 0.5))
+
+
+def simulate(cloth):
+    cloth_mod = cloth.modifiers.new("ClothMod", 'CLOTH')
+    
+    ## Cloth Settings
+    cloth_mod.collision_settings.use_self_collision = True
+    cloth_mod.collision_settings.distance_min = 0.001
+    cloth_mod.collision_settings.self_distance_min = 0.003
+    cloth_mod.collision_settings.self_friction = 50
+    
+    cloth_mod.settings.tension_stiffness = 5
+    cloth_mod.settings.compression_stiffness = 5
+    cloth_mod.settings.shear_stiffness = 1
+    cloth_mod.settings.bending_stiffness = 0.1
+    
+    cloth_mod.settings.tension_damping = 100
+    cloth_mod.settings.compression_damping = 100
+    cloth_mod.settings.shear_damping = 5
+    cloth_mod.settings.bending_damping = 0.5
+
+    bpy.context.scene.frame_set(0) 
+    for i in range(99):
+        bpy.context.scene.frame_set(bpy.context.scene.frame_current + 1)
+        
+    bpy.ops.object.modifier_apply(modifier="ClothMod")
+    bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
+    
+    bpy.ops.object.modifier_add(type='SUBSURF')
+    
+    subsurf = cloth.modifiers.new('SubsurfMod', 'SUBSURF')
+    subsurf.levels = 3
+    subsurf.render_levels = 3
+    bpy.ops.object.shade_smooth()
+
+
+simulate(cloth)
